@@ -1,0 +1,211 @@
+name: Build APK Release
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Java JDK
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          cache: gradle
+      
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v2
+        with:
+          api-level: 34
+          ndk-version: '25.1.8937393'
+      
+      - name: Grant Gradle Permissions
+        run: chmod +x gradlew
+      
+      - name: Build Gradle Cache
+        run: ./gradlew build --dry-run
+      
+      - name: Build Debug APK
+        run: ./gradlew assembleDebug --stacktrace
+      
+      - name: Build Release APK
+        run: ./gradlew assembleRelease --stacktrace
+      
+      - name: Build Android App Bundle
+        run: ./gradlew bundleRelease --stacktrace
+      
+      - name: Upload Debug APK
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+          retention-days: 7
+      
+      - name: Upload Release APK
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: release-apk
+          path: app/build/outputs/apk/release/*.apk
+          retention-days: 30
+      
+      - name: Upload App Bundle
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: app-bundle
+          path: app/build/outputs/bundle/release/*.aab
+          retention-days: 30
+      
+      - name: Generate Build Report
+        if: always()
+        run: |
+          mkdir -p build-reports
+          echo "# Build Report" > build-reports/report.md
+          echo "Build Date: $(date)" >> build-reports/report.md
+          echo "Git Commit: $(git rev-parse --short HEAD)" >> build-reports/report.md
+          echo "" >> build-reports/report.md
+          echo "## Artifacts" >> build-reports/report.md
+          ls -lh app/build/outputs/apk/debug/ >> build-reports/report.md || echo "Debug APK not found"
+          ls -lh app/build/outputs/apk/release/ >> build-reports/report.md || echo "Release APK not found"
+      
+      - name: Upload Build Report
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: build-report
+          path: build-reports/
+          retention-days: 7
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      
+      - name: Setup Java JDK
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          cache: gradle
+      
+      - name: Grant Gradle Permissions
+        run: chmod +x gradlew
+      
+      - name: Run Unit Tests
+        run: ./gradlew testDebugUnitTest --stacktrace
+      
+      - name: Upload Test Results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: test-results
+          path: app/build/test-results/
+
+  analyze:
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      
+      - name: Setup Java JDK
+        uses: actions/setup-java@v3
+        with:
+          java-version: '11'
+          distribution: 'temurin'
+          cache: gradle
+      
+      - name: Grant Gradle Permissions
+        run: chmod +x gradlew
+      
+      - name: Run Lint
+        run: ./gradlew lint --stacktrace
+        continue-on-error: true
+      
+      - name: Upload Lint Report
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results*.html
+
+  release:
+    runs-on: ubuntu-latest
+    needs: [build, test, analyze]
+    if: startsWith(github.ref, 'refs/tags/v')
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v3
+      
+      - name: Download Release APK
+        uses: actions/download-artifact@v3
+        with:
+          name: release-apk
+          path: ./release-apk/
+      
+      - name: Get Version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+      
+      - name: Create Release Notes
+        id: release_notes
+        run: |
+          echo "## Phone Defender ${{ steps.version.outputs.version }}" > release-notes.md
+          echo "" >> release-notes.md
+          echo "### 🎉 Release Features" >> release-notes.md
+          echo "- ✅ Advanced Malware Scanner" >> release-notes.md
+          echo "- ✅ Real-time Network Monitoring" >> release-notes.md
+          echo "- ✅ App Permission Tracker" >> release-notes.md
+          echo "- ✅ File Encryption (AES-256)" >> release-notes.md
+          echo "- ✅ WiFi Security Analysis" >> release-notes.md
+          echo "- ✅ Password Strength Checker" >> release-notes.md
+          echo "" >> release-notes.md
+          echo "### 📊 Build Info" >> release-notes.md
+          echo "- Build Date: $(date)" >> release-notes.md
+          echo "- Commit: $(git rev-parse --short HEAD)" >> release-notes.md
+          echo "- Author: ${{ github.actor }}" >> release-notes.md
+      
+      - name: Create GitHub Release
+        uses: actions/create-release@v1
+        id: create_release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          release_name: Phone Defender ${{ steps.version.outputs.version }}
+          body_path: release-notes.md
+          draft: false
+          prerelease: false
+      
+      - name: Upload Release APK Asset
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: ${{ steps.create_release.outputs.upload_url }}
+          asset_path: ./release-apk/app-release.apk
+          asset_name: PhoneDefender-${{ steps.version.outputs.version }}.apk
+          asset_content_type: application/vnd.android.package-archive
+      
+      - name: Publish Release
+        run: echo "✅ Release ${{ steps.version.outputs.version }} published successfully!"
